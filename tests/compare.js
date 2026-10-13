@@ -1,5 +1,5 @@
-const P = require(process.argv[2] + "/program.js");
-const ref = require(process.argv[3]);
+const P = require(require("path").resolve(process.argv[2], "program.js"));
+const ref = require(require("path").resolve(process.argv[3]));
 let bad = 0, checked = 0;
 for (const row of ref) {
   const [key, w, d, title, phase, mainName, how, rest, accName, accHow, accRest, finName, finHow, finRest, target] = row;

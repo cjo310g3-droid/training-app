@@ -4,3 +4,5 @@
   `node tests/compare.js . tests/excel-v6-reference.json`
 - `e2e.js`：用 Playwright 模擬 Android 手機操作（需先在 8765 埠開本機伺服器）
   `npx http-server . -p 8765 -c-1 & node tests/e2e.js /tmp`
+- `background.js`：休息提醒。App 在前景不跳通知、網頁關掉後背景程式到點跳通知、按跳過會取消、背景耽擱後回來時間正確
+  `npx http-server . -p 8765 -c-1 & node tests/background.js`

@@ -38,35 +38,82 @@
 
   let viewKey = null; // 從紀錄頁點進來看的那一天；null 代表「接著上次」
 
-  // ───────── 提醒：震動、嗶聲、螢幕不關 ─────────
-  let audio = null;
+  // ───────── 提醒：嗶聲、震動、系統通知、螢幕不關 ─────────
+  // 切到別的 App 或關螢幕時，網頁的計時會被手機暫停，所以：
+  // 1. 嗶聲在開始休息時就先排進音效時間軸，到點由音效系統自己響，不靠網頁計時
+  // 2. 同時請離線背景程式（sw.js）到點跳系統通知（會震動、用通知鈴聲），網頁在前景時就不跳
+  // 3. 時間一律用「結束時刻」計算，回到 App 時剩幾秒馬上對
+  let audio = null, master = null, scheduled = [];
   function unlockAudio() {
-    if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+    if (!audio) {
+      try {
+        audio = new (window.AudioContext || window.webkitAudioContext)();
+        // 壓縮器把峰值壓住再整體放大，手機喇叭聽起來更大聲又不破音
+        const comp = audio.createDynamicsCompressor();
+        comp.threshold.value = -18; comp.knee.value = 6; comp.ratio.value = 8; comp.attack.value = 0.002; comp.release.value = 0.1;
+        master = audio.createGain(); master.gain.value = 1.6;
+        master.connect(comp).connect(audio.destination);
+      } catch (e) { audio = null; }
+    }
     if (audio && audio.state === "suspended") audio.resume();
   }
-  function beep(times) {
-    if (!audio) return;
-    for (let i = 0; i < times; i++) {
-      const t = audio.currentTime + i * 0.35;
-      const o = audio.createOscillator(), g = audio.createGain();
-      o.type = "sine"; o.frequency.value = 880;
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.5, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
-      o.connect(g).connect(audio.destination);
-      o.start(t); o.stop(t + 0.3);
-    }
+  // 在音效時間軸 t 秒處排一聲；回傳節點，之後可以取消
+  function tone(t, freq, dur, peak) {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = "square"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + 0.01);
+    g.gain.setValueAtTime(peak, t + dur - 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(master);
+    o.start(t); o.stop(t + dur + 0.02);
+    return o;
   }
-  function alertUser(strong) {
-    if (navigator.vibrate) navigator.vibrate(strong ? [400, 150, 400, 150, 700] : [250]);
-    beep(strong ? 3 : 1);
+  // kind：pip＝倒數最後 3 秒的短嗶；step＝間歇換階段；end＝休息結束（最大聲、最長）
+  function pattern(t, kind) {
+    const out = [];
+    if (kind === "pip") out.push(tone(t, 1319, 0.1, 0.35));
+    else if (kind === "step") { out.push(tone(t, 1568, 0.3, 0.9)); out.push(tone(t + 0.4, 1568, 0.3, 0.9)); }
+    else for (let r = 0; r < 2; r++) for (let i = 0; i < 3; i++) out.push(tone(t + r * 1.4 + i * 0.4, i % 2 ? 2093 : 1568, 0.3, 0.9));
+    return out;
   }
+  function beepNow(kind) { if (audio) pattern(audio.currentTime + 0.02, kind); }
+  function cancelSounds() { scheduled.forEach((o) => { try { o.stop(); } catch (e) { /* 已經響過 */ } }); scheduled = []; }
+
+  function sw(msg) {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.ready.then((r) => { if (r.active) r.active.postMessage(msg); }).catch(() => {});
+  }
+  const NOTIFY_ASKED = "training-app-notify-asked";
+  function canNotify() { return "Notification" in window && "serviceWorker" in navigator; }
+  // 第一次開始休息時順便問一次要不要開通知（之後到「設定」也能開）
+  function askNotifyOnce() {
+    if (!canNotify() || Notification.permission !== "default") return;
+    try { if (localStorage.getItem(NOTIFY_ASKED)) return; localStorage.setItem(NOTIFY_ASKED, "1"); } catch (e) { return; }
+    Notification.requestPermission().then((p) => { if (p === "granted") toast("已開啟：切到別的 App 也會提醒休息結束"); renderSettings(); });
+  }
+  function enableNotify() {
+    if (!canNotify()) { toast("這個瀏覽器不支援通知"); return; }
+    Notification.requestPermission().then((p) => {
+      toast(p === "granted" ? "已開啟背景提醒" : "通知被封鎖了，請到手機的 Chrome 網站設定裡允許通知");
+      renderSettings();
+    });
+  }
+
   let wakeLock = null;
   async function keepAwake() {
     try { if ("wakeLock" in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); } }
     catch (e) { /* 不支援就算了 */ }
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && timer.active) keepAwake(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    sw({ type: "rest-clear" });
+    if (!timer.active) return;
+    keepAwake();
+    // 回到 App：音效如果被暫停過，時間軸會落後，重排一次
+    if (audio && audio.state !== "running") audio.resume().then(armAlerts).catch(() => {});
+    tick();
+  });
 
   // ───────── 倒數計時 ─────────
   const el = (id) => document.getElementById(id);
@@ -74,20 +121,42 @@
   let tickHandle = null;
 
   function runPhases(phases, onPhaseDone) {
-    unlockAudio(); keepAwake();
+    unlockAudio(); keepAwake(); askNotifyOnce();
     timer.active = true; timer.phases = phases; timer.idx = 0; timer.onPhaseDone = onPhaseDone || null; timer.hideAt = 0;
-    startPhase();
+    startPhase(Date.now());
+    armAlerts();
     if (!tickHandle) tickHandle = setInterval(tick, 200);
     tick();
   }
-  function startPhase() {
+  // 從上一段的結束時刻接著算，背景耽擱也不會越拖越久
+  function startPhase(from) {
     const ph = timer.phases[timer.idx];
-    timer.end = Date.now() + ph.sec * 1000;
+    timer.end = from + ph.sec * 1000;
+    timer.lastBeep = null;
     el("timer").hidden = false;
     el("timer").className = "timer" + (ph.kind === "work" ? " work" : "");
     el("timer-label").textContent = ph.label;
     el("timer-sub").textContent = ph.sub || "";
   }
+  // 把剩下每一段的結束時刻排好：嗶聲排進音效時間軸，通知交給背景程式
+  function armAlerts() {
+    cancelSounds();
+    const now = Date.now(), items = [];
+    let end = timer.end;
+    for (let j = timer.idx; j < timer.phases.length; j++) {
+      if (j > timer.idx) end += timer.phases[j].sec * 1000;
+      const ph = timer.phases[j], last = j === timer.phases.length - 1;
+      const next = last ? null : timer.phases[j + 1];
+      items.push({ at: end, last, title: last ? (ph.doneText || "休息結束") : next.label, body: last ? (ph.doneText ? "做完了！" : "該開始下一組了！") : (next.sub || "") });
+      if (audio) {
+        const base = audio.currentTime + (end - now) / 1000;
+        for (let s = 3; s >= 1; s--) if (base - s > audio.currentTime) scheduled.push(...pattern(base - s, "pip"));
+        if (base > audio.currentTime) scheduled.push(...pattern(base, last ? "end" : "step"));
+      }
+    }
+    sw({ type: "rest-schedule", items });
+  }
+  function disarm() { cancelSounds(); sw({ type: "rest-cancel" }); }
   function fmtSec(s) { return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
   function tick() {
     if (!timer.active) {
@@ -95,38 +164,43 @@
       if (!timer.hideAt && tickHandle) { clearInterval(tickHandle); tickHandle = null; }
       return;
     }
+    // 背景回來時可能已經過了好幾段，一次補完
+    while (timer.active && Date.now() >= timer.end) phaseDone(false);
+    if (!timer.active) return;
     const left = Math.max(0, Math.ceil((timer.end - Date.now()) / 1000));
     el("timer-num").textContent = fmtSec(left);
     if (left <= 3 && left > 0 && timer.lastBeep !== left) { timer.lastBeep = left; if (navigator.vibrate) navigator.vibrate(60); }
-    if (Date.now() >= timer.end) phaseDone(false);
   }
   function phaseDone(skipped) {
     const ph = timer.phases[timer.idx];
+    const late = Date.now() - timer.end > 2000; // 在背景就過了，嗶聲和通知已經提醒過
     if (timer.onPhaseDone) timer.onPhaseDone(ph, timer.idx);
     timer.idx++;
     if (timer.idx < timer.phases.length) {
-      if (!skipped) alertUser(false);
-      startPhase();
+      if (!skipped && !late && navigator.vibrate) navigator.vibrate([250]);
+      startPhase(skipped ? Date.now() : timer.end);
+      if (skipped) armAlerts();
       return;
     }
     timer.active = false;
     if (!skipped) {
-      alertUser(true);
+      if (!late && navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 700]);
       el("timer").className = "timer done";
       el("timer-label").textContent = ph.doneText || "休息結束";
       el("timer-num").textContent = "開始！";
       el("timer-sub").textContent = "";
       timer.hideAt = Date.now() + 2500;
     } else {
+      disarm();
       el("timer").hidden = true;
     }
   }
-  el("timer-plus").addEventListener("click", () => { if (timer.active) { timer.end += 15000; tick(); } });
+  el("timer-plus").addEventListener("click", () => { if (timer.active) { timer.end += 15000; armAlerts(); tick(); } });
   el("timer-skip").addEventListener("click", () => {
     if (!timer.active) { el("timer").hidden = true; timer.hideAt = 0; return; }
     phaseDone(true);
   });
-  function stopTimer() { timer.active = false; timer.hideAt = 0; el("timer").hidden = true; }
+  function stopTimer() { if (timer.active) disarm(); timer.active = false; timer.hideAt = 0; el("timer").hidden = true; }
 
   // ───────── 小提示 ─────────
   let toastHandle = null;
@@ -188,7 +262,7 @@
           html += `<button class="dot${i < c ? " on" : ""}" data-k="${k}" data-b="${bi}" data-l="${li}" data-i="${i}" aria-label="第 ${i + 1} ${unit}${i < c ? "（已完成）" : ""}"><span>${i + 1}</span></button>`;
         }
         html += `</div>`;
-        if (ln.interval) html += `<button class="btn ghost interval-btn" data-act="interval" data-k="${k}" data-b="${bi}" data-l="${li}">開始間歇計時（${ln.sets} 輪）</button>`;
+        if (ln.interval) html += `<button class="btn ghost interval-btn" data-act="interval" data-k="${k}" data-b="${bi}" data-l="${li}">${ln.interval.rest ? `開始間歇計時（${ln.sets} 輪）` : `開始計時（${ln.sets} ${ln.unit || "輪"} × ${ln.interval.work} 秒）`}</button>`;
         html += `</div>`;
       });
       html += `</div>`;
@@ -235,12 +309,18 @@
     if (start === 0) setCount(k, id, 0);
     const phases = [{ kind: "rest", sec: 5, label: "準備", sub: ln.text }];
     for (let r = start; r < ln.sets; r++) {
+      if (!ln.interval.rest) { // 不休息：每段做完就算一趟，例如單手提走 30 秒換手
+        const last = r + 1 === ln.sets;
+        phases.push({ kind: "work", sec: ln.interval.work, label: `第 ${r + 1} ${ln.unit || "輪"}${ln.interval.hands ? (r % 2 ? "：右手" : "：左手") : ""}`,
+          sub: last ? "最後一趟" : (ln.interval.hands ? "時間到就換手" : "時間到接下一段"), round: r, doneText: "收尾完成" });
+        continue;
+      }
       phases.push({ kind: "work", sec: ln.interval.work, label: `第 ${r + 1} 輪：做`, sub: ln.text, round: r });
       phases.push({ kind: "rest", sec: ln.interval.rest, label: `第 ${r + 1} 輪：休息`, sub: r + 1 < ln.sets ? "下一輪快開始了" : "最後一次休息", round: r, doneText: "收尾完成" });
     }
     renderToday();
     runPhases(phases, (ph) => {
-      if (ph.kind === "rest" && ph.round !== undefined) { setCount(k, id, ph.round + 1); renderToday(); }
+      if (ph.round !== undefined && (ph.kind === "rest" || !ln.interval.rest)) { setCount(k, id, ph.round + 1); renderToday(); }
     });
   }
 
@@ -350,6 +430,16 @@
     });
     html += `</div><div style="margin-top:12px"><button class="btn block" data-act="save-max">儲存</button></div></div>`;
 
+    const perm = canNotify() ? Notification.permission : "unsupported";
+    html += `<div class="card"><h2>休息提醒</h2>
+      <p class="muted">${perm === "granted" ? "背景通知已開啟：切到別的 App 或關螢幕，休息結束時也會跳通知並震動。"
+        : perm === "denied" ? "通知被封鎖了：請到 Chrome 的「網站設定 → 通知」允許這個網站，切到別的 App 時才會提醒。"
+        : perm === "unsupported" ? "這個瀏覽器不支援通知；切到別的 App 時只能靠提示音（要把媒體音量開大）。"
+        : "開啟通知後，切到別的 App 或關螢幕，休息結束時也會跳通知並震動。"}
+      提示音走「媒體音量」，聽不清楚請把媒體音量調大。</p>
+      <div class="btn-row">${perm === "default" ? `<button class="btn" data-act="notify">開啟背景通知</button>` : ""}
+      <button class="btn ghost" data-act="test-sound">試聽提示音</button></div></div>`;
+
     html += `<div class="card"><h2>八週做完後</h2>
       <p class="muted">先把第 8 週測出的新重量填到上面並儲存，再按這裡從第 1 週重新開始。這一輪的紀錄會留在「紀錄」頁。</p>
       <button class="btn gold block" data-act="new-cycle">開始下一輪（第 ${state.cycle + 1} 輪）</button></div>`;
@@ -358,7 +448,7 @@
     P.GUIDE.forEach(([t, d]) => { html += `<details><summary>${esc(t)}</summary><p>${esc(d)}</p></details>`; });
     html += `</div><div class="card"><h2>動作說明</h2>`;
     P.MOVES.forEach(([t, d]) => { html += `<details><summary>${esc(t)}</summary><p>${esc(d)}</p></details>`; });
-    html += `</div><p class="muted" style="text-align:center">紀錄只存在這支手機，不會上傳。版本 1.0</p>`;
+    html += `</div><p class="muted" style="text-align:center">紀錄只存在這支手機，不會上傳。版本 1.1</p>`;
     v.innerHTML = html;
   }
 
@@ -415,6 +505,8 @@
       case "import": el("import-file").click(); break;
       case "save-max": saveMax(); break;
       case "new-cycle": newCycle(); break;
+      case "notify": enableNotify(); break;
+      case "test-sound": unlockAudio(); beepNow("end"); if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 700]); break;
     }
   });
 

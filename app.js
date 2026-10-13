@@ -147,7 +147,7 @@
       if (j > timer.idx) end += timer.phases[j].sec * 1000;
       const ph = timer.phases[j], last = j === timer.phases.length - 1;
       const next = last ? null : timer.phases[j + 1];
-      items.push({ at: end, last, title: last ? (ph.doneText || "休息結束") : next.label, body: last ? "該開始下一組了！" : (next.sub || "") });
+      items.push({ at: end, last, title: last ? (ph.doneText || "休息結束") : next.label, body: last ? (ph.doneText ? "做完了！" : "該開始下一組了！") : (next.sub || "") });
       if (audio) {
         const base = audio.currentTime + (end - now) / 1000;
         for (let s = 3; s >= 1; s--) if (base - s > audio.currentTime) scheduled.push(...pattern(base - s, "pip"));
@@ -262,7 +262,7 @@
           html += `<button class="dot${i < c ? " on" : ""}" data-k="${k}" data-b="${bi}" data-l="${li}" data-i="${i}" aria-label="第 ${i + 1} ${unit}${i < c ? "（已完成）" : ""}"><span>${i + 1}</span></button>`;
         }
         html += `</div>`;
-        if (ln.interval) html += `<button class="btn ghost interval-btn" data-act="interval" data-k="${k}" data-b="${bi}" data-l="${li}">開始間歇計時（${ln.sets} 輪）</button>`;
+        if (ln.interval) html += `<button class="btn ghost interval-btn" data-act="interval" data-k="${k}" data-b="${bi}" data-l="${li}">${ln.interval.rest ? `開始間歇計時（${ln.sets} 輪）` : `開始計時（${ln.sets} ${ln.unit || "輪"} × ${ln.interval.work} 秒）`}</button>`;
         html += `</div>`;
       });
       html += `</div>`;
@@ -309,12 +309,18 @@
     if (start === 0) setCount(k, id, 0);
     const phases = [{ kind: "rest", sec: 5, label: "準備", sub: ln.text }];
     for (let r = start; r < ln.sets; r++) {
+      if (!ln.interval.rest) { // 不休息：每段做完就算一趟，例如單手提走 30 秒換手
+        const last = r + 1 === ln.sets;
+        phases.push({ kind: "work", sec: ln.interval.work, label: `第 ${r + 1} ${ln.unit || "輪"}${ln.interval.hands ? (r % 2 ? "：右手" : "：左手") : ""}`,
+          sub: last ? "最後一趟" : (ln.interval.hands ? "時間到就換手" : "時間到接下一段"), round: r, doneText: "收尾完成" });
+        continue;
+      }
       phases.push({ kind: "work", sec: ln.interval.work, label: `第 ${r + 1} 輪：做`, sub: ln.text, round: r });
       phases.push({ kind: "rest", sec: ln.interval.rest, label: `第 ${r + 1} 輪：休息`, sub: r + 1 < ln.sets ? "下一輪快開始了" : "最後一次休息", round: r, doneText: "收尾完成" });
     }
     renderToday();
     runPhases(phases, (ph) => {
-      if (ph.kind === "rest" && ph.round !== undefined) { setCount(k, id, ph.round + 1); renderToday(); }
+      if (ph.round !== undefined && (ph.kind === "rest" || !ln.interval.rest)) { setCount(k, id, ph.round + 1); renderToday(); }
     });
   }
 

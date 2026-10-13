@@ -1,11 +1,11 @@
-// 休息提醒：網頁不在前景時背景程式會跳通知、回到 App 剩餘時間正確
+// 休息提醒與單手提走計時：網頁不在前景時背景程式會跳通知、回到 App 剩餘時間正確
 // 需先在 8765 埠開本機伺服器：npx http-server . -p 8765 -c-1 & node tests/background.js
 const { chromium, devices } = require("/opt/node22/lib/node_modules/playwright");
 (async () => {
   const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required"] });
   const ctx = await browser.newContext({ ...devices["Pixel 7"], serviceWorkers: "allow", permissions: ["notifications"] });
   const page = await ctx.newPage();
-  const errs = []; page.on("pageerror", (e) => errs.push(e.message));
+  const errs = []; page.on("pageerror", (e) => errs.push(e.message)); ctx.on("dialog", (d) => d.accept());
   await page.goto("http://127.0.0.1:8765/"); await page.waitForSelector(".day-title");
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload(); await page.waitForSelector(".day-title");
@@ -40,7 +40,21 @@ const { chromium, devices } = require("/opt/node22/lib/node_modules/playwright")
   await page3.evaluate(() => { const real = Date.now; const off = 70000; Date.now = () => real() + off; document.dispatchEvent(new Event("visibilitychange")); });
   await page3.waitForTimeout(400);
   console.log("跳過 70 秒後:", await page3.textContent("#timer-label"), await page3.textContent("#timer-num"));
-  // 5) 設定頁有提醒卡片
+  // 5) B 日單手提走：有 30 秒換手計時，做完 4 趟圓圈自動打勾
+  await page3.evaluate(() => { localStorage.clear(); });
+  await page3.reload(); await page3.waitForSelector(".day-title");
+  await page3.click('[data-act="finish"]'); // 1A 直接完成，跳到 1B
+  const btn = page3.locator('[data-act="interval"]');
+  console.log("提走按鈕:", await btn.textContent());
+  await btn.click(); await page3.waitForTimeout(300);
+  const jump = (s) => page3.evaluate((s) => { const real = Date.now; Date.now = () => real() + s * 1000; }, s);
+  await jump(6); await page3.waitForTimeout(400);
+  console.log("第一趟:", await page3.textContent("#timer-label"), await page3.textContent("#timer-num"), await page3.textContent("#timer-sub"));
+  await jump(30); await page3.waitForTimeout(400);
+  console.log("換手後:", await page3.textContent("#timer-label"), await page3.textContent("#timer-num"));
+  await jump(100); await page3.waitForTimeout(400);
+  console.log("做完:", await page3.textContent("#timer-label"), "| 打勾數:", await page3.$$eval(".interval-btn ~ * .dot.on, .dot.on", (e) => e.length));
+  // 6) 設定頁有提醒卡片
   await page3.click('.tab[data-view="settings"]');
   console.log("設定卡片:", (await page3.textContent("#view-settings .card >> nth=1")).replace(/\s+/g, " ").slice(0, 60));
   await page3.click('[data-act="test-sound"]');

@@ -110,7 +110,7 @@
     if (light) return [acc, null];
     let fin;
     if (day === "A") fin = { name: "壺鈴擺盪", restText: "每組休 30 秒", lines: [line("壺鈴擺盪 15 下", 4, 30)], excelHow: "15 下 × 4 組" };
-    else if (day === "B") fin = { name: "單手提走", restText: "不休息", lines: [line("單手提壺鈴走 30 秒就換手", 4, 0, { unit: "趟" })], excelHow: "單手提壺鈴走 30 秒就換手，共 4 趟" };
+    else if (day === "B") fin = { name: "單手提走", restText: "不休息", lines: [line("單手提壺鈴走 30 秒就換手", 4, 0, { unit: "趟", interval: { work: 30, rest: 0, hands: true } })], excelHow: "單手提壺鈴走 30 秒就換手，共 4 趟" };
     else if (day === "C") fin = { name: "壺鈴擺盪", restText: "已含在節奏內", lines: [line("壺鈴擺盪：做 20 秒／休 20 秒", 6, 0, { unit: "輪", interval: { work: 20, rest: 20 } })], excelHow: "做 20 秒／休 20 秒 × 6 輪" };
     else fin = { name: "簡化波比", restText: "已含在節奏內", lines: [line("簡化波比：做 20 秒／休 20 秒", 6, 0, { unit: "輪", interval: { work: 20, rest: 20 } })], excelHow: "做 20 秒／休 20 秒 × 6 輪" };
     return [acc, fin];
